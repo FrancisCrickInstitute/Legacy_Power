@@ -1,6 +1,7 @@
 library(simr)
 library(lme4)
 library(tidyverse)
+library(rms)
 
 ## Sample sizes
 
@@ -22,51 +23,51 @@ n_per_drug_per_cohort <- list(
 )
 
 # Ns in the control cohort
-cc_prop  = 1 # multiply corresponding case numbers by this for controls, then 
-cc_const = 0 # add this amount
+cc_prop  = 0.2; cc_const = 20 # multiply by prop, add const, to get nunber of controls
+# 0.2 and 0 above give us a total of 500 controls - as would 0 and 100
+#cc_prop = 0; cc_const = 100
 n_per_drug_per_cohort$control <- lapply(
   n_per_drug_per_cohort$case, function(x) sum(x)*cc_prop + cc_const
 )
 
 ## Effect sizes
 
+
 # for controls with all doses, response in the vaccinated-for variant
 # odds scale. So e.g. 19 = 95% chance success, 5% failure
 # final_vaccine_odds <- percent / (100-percent)
-final_vaccine_odds <- 19
+prob2odd <- function(p) p/(1-p)
+odd2prob <- function(o) o/(1+o)
+
+final_vaccine_odds <- prob2odd(0.90) # 
 
 # Relative for the other variants
 variant_multiplier <- list(
   vaccine_target = 1,
-  voc = 0.9)
-
-# Relative for other doses 
-dose_multiplier <- list(
-  first = 0.95,
-  second = 1
+  voc = prob2odd(.7)/final_vaccine_odds
 )
 
 # Overall case effect
 case_effect <- list(
   control = 1,
-  case    = 0.8
+  case    = prob2odd(.7)/final_vaccine_odds
 )
 
 # effect of interest
-eoi <- list(mult = 0.25,
+eoi <- list(mult = 0.5, # 0.5 is about half the log-odds effect size of 0.7
            target = quote(variant=="voc" & cohort=="case"))
 
 # sd of effect across diseases
-disease_sd <- list(
-  control = .1,
-  case = 0.1
-)
+# either side of .70. 95% confit is approx double stderr, so +/- 10 percentage points
+# half the width, and then get average of extent
+# (prob2odd(.75)/final_vaccine_odds - prob2odd(.65)/final_vaccine_odds )/2
+# is 0.06.  
+
+disease_sd <- 0.06
 
 # sd of treatment effect within disease
-drug_sd <- list(
-  control= 0.1,
-  case = 0.1
-)
+
+drug_sd <- 0.02
 
 
 
@@ -93,8 +94,8 @@ case_control_frame <- do.call(rbind, case_control)
 
   
 measure_frame <- expand.grid(
-  variant = names(variant_multiplier),
-  dose = names(dose_multiplier))
+  variant = names(variant_multiplier)
+)
 
 ind <- expand.grid(
   i_cc = 1:nrow(case_control_frame),
@@ -103,7 +104,7 @@ ind <- expand.grid(
 
 case_control_frame <- cbind(
   case_control_frame[ind$i_cc,],
-  measure_frame[ind$i_measure,]
+  measure_frame[ind$i_measure,,drop=FALSE]
   )
 
 
@@ -111,70 +112,77 @@ case_control_frame <- cbind(
 case_control_frame <- case_control_frame %>%
   dplyr::mutate(
     odds = final_vaccine_odds *
-      unlist(variant_multiplier[variant]) *
-      unlist(dose_multiplier[dose])
+      unlist(variant_multiplier[variant])
   )
 
 
 bootRes <- data.frame(i=1:100,
                      p=0.0,
                      effect=0.0)
+diseaseRes <- lapply(n_per_drug_per_cohort$case,
+                    function(x) bootRes)
+
 
 for (i in 1:nrow(bootRes)) { 
   cat(i, " ")
-  
-## Get instance of random effects:
-disease_effect <- imap(case_effect, function(mult, cc) {
-  is_cc <- case_control_frame$cohort==cc
-  diseases <- unique(case_control_frame$disease[is_cc])
-  setNames(
-    rnorm(length(diseases),
-          case_effect[[cc]],disease_sd[[cc]]
-          ),
-    diseases
+  ## Get instance of random effects:
+  diseases <- names(n_per_drug_per_cohort$case)
+  offset <- rnorm(length(diseases), 0, disease_sd)
+  disease_effect <- lapply(
+    case_effect,
+    function(mult) {setNames(offset+mult, diseases)}
   )
-}
-)
-
-drug_effect <- imap(case_effect, function(mult_cc, cc) {
-  diseases <- disease_effect[[cc]]
-  imap(diseases, function(mult, disease) {
-    x <- rnorm(n=length(n_per_drug_per_cohort[[cc]][[disease]]),
-          mult,
-          drug_sd[[cc]])
-    setNames(x, paste(cc, disease, seq(along=n_per_drug_per_cohort[[cc]][[disease]]), sep="_"))
+    
+  drug_effect <- imap(disease_effect, function(diseases, cc) {
+    imap(diseases, function(mult, disease) {
+      if (cc=="case") {
+        x <- rnorm(n=length(n_per_drug_per_cohort[[cc]][[disease]]),
+                  mult,
+                  drug_sd)
+      } else {
+        x <- mult
+      }
+      setNames(x, paste(cc, disease, seq(along=n_per_drug_per_cohort[[cc]][[disease]]), sep="_"))
+    }
+    )
   }
   )
-}
-)
 
-drug_effect_frame <-
-  map_dfr(drug_effect,
-          function(cohort) {
-            map_dfr(cohort,
-                    function(disease){
-                      data.frame(mult=disease, drug=names(disease))
-                    },
-                    .id="disease")
-          },
-          .id="cohort")
-
-
-
-dat <- dplyr::inner_join(case_control_frame, drug_effect_frame)
-
-dat <- mutate(
-  dat,
-  mult = mult * ifelse(eval(eoi$target), eoi$mult, 1)
-)
-
-dat <- mutate(dat,
-             response = rlogis(n()) < log(odds*mult))
-                            
-
-
-fit <- glmer(response ~ cohort * variant + (1|disease/drug), data=dat, family=binomial)
-bootRes[i,-1] <- summary(fit)$coef["cohortcontrol:variantvoc", c(4,1)]
+  drug_effect_frame <-
+    map_dfr(drug_effect,
+            function(cohort) {
+              map_dfr(cohort,
+                      function(disease){
+                        data.frame(mult=disease, drug=names(disease))
+                      },
+                      .id="disease")
+            },
+            .id="cohort")
+  dat <- dplyr::inner_join(case_control_frame, drug_effect_frame)
+  dat <- mutate(
+    dat,
+    mult = mult * ifelse(eval(eoi$target), eoi$mult, 1)
+  )
+  dat <- mutate(dat,
+               response = rlogis(n()) < log(odds*mult))
+  if (alternative_fits <- FALSE) {
+    dat_agg <- dat %>%
+      dplyr::select(-odds, -mult) %>%
+      group_by(cohort, disease, drug, variant) %>%
+      summarise(respond=sum(response),
+                n=length(response),
+                .groups="drop"
+                ) %>%
+      mutate(prob_response=respond/n)
+    # ggplot(dat_agg, aes(x=variant, y=prob_response, colour=cohort)) + geom_point() + facet_wrap(~drug)
+    fit <- lrm(response ~ cohort* variant, data=dat, x=TRUE, y=TRUE)
+    g <- robcov(fit)
+    h <- bootcov(fit, cluster=dat$drug)
+    fit <- ols(prob_response~cohort * variant, data=dat_agg, x=TRUE, y=TRUE)
+    h <- bootcov(fit, cluster=dat_agg$drug)
+  }
+  fit <- glmer(response ~ cohort * variant +   (1|disease), data=dat, family=binomial)
+  bootRes[i,-1] <- summary(fit)$coef["cohortcontrol:variantvoc", c(4,1)]
 }
 
 
@@ -187,5 +195,5 @@ additive_prob <- function(start, end1, end2, link="logit") {
   final_odd <- fns$linkfun(start) + overall_odd_effect
   fns$linkinv(final_odd)
 }
-  
-                  
+
+
