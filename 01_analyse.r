@@ -31,6 +31,8 @@ n_per_drug_per_cohort$control <- lapply(
   n_per_drug_per_cohort$case, function(x) sum(x)*cc_prop + cc_const
 )
 
+# scale back to 2000 in total
+n_per_drug_per_cohort <- lapply(n_per_drug_per_cohort, function(x) {lapply(x, function(y) y * 2000/3114)})
 ## Effect sizes
 
 
