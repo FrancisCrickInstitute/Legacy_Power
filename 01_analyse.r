@@ -2,6 +2,7 @@ library(simr)
 library(lme4)
 library(tidyverse)
 library(rms)
+library(emmeans)
 
 ## Sample sizes
 
@@ -38,6 +39,16 @@ n_per_drug_per_cohort$control <- lapply(
 # final_vaccine_odds <- percent / (100-percent)
 prob2odd <- function(p) p/(1-p)
 odd2prob <- function(o) o/(1+o)
+
+outcomes <- expand.grid(strain=c("vaccine", "voc"),
+                       cohort=c("control","case"))
+baseline=0.05
+voc <- 0.25
+case <- 0.25
+outcomes$absolute <- c(baseline, case, voc, case+voc-baseline)
+outcomes$relative <- c(baseline, case, voc, case * voc / baseline)
+outcomes$odds <- c(baseline, case, voc, odd2prob(prob2odd(voc) * prob2odd(case)/prob2odd(baseline) ))
+  
 
 final_vaccine_odds <- prob2odd(0.90) # 
 
@@ -89,6 +100,7 @@ case_control <- imap(n_per_drug_per_cohort,
                         )
                       }
                     )
+case_control$control$drug <- "none"
 case_control_frame <- do.call(rbind, case_control)
 
 
@@ -112,7 +124,7 @@ case_control_frame <- cbind(
 case_control_frame <- case_control_frame %>%
   dplyr::mutate(
     odds = final_vaccine_odds *
-      unlist(variant_multiplier[variant])
+      unlist(variant_multiplier[as.character(variant)])
   )
 
 
@@ -139,10 +151,10 @@ for (i in 1:nrow(bootRes)) {
         x <- rnorm(n=length(n_per_drug_per_cohort[[cc]][[disease]]),
                   mult,
                   drug_sd)
+        setNames(x, paste(cc, disease, seq(along=n_per_drug_per_cohort[[cc]][[disease]]), sep="_"))
       } else {
-        x <- mult
+        x <- c("none"=mult)
       }
-      setNames(x, paste(cc, disease, seq(along=n_per_drug_per_cohort[[cc]][[disease]]), sep="_"))
     }
     )
   }
@@ -196,4 +208,49 @@ additive_prob <- function(start, end1, end2, link="logit") {
   fns$linkinv(final_odd)
 }
 
+
+
+### Individual responsiveness
+p_wuhan <- list(control = 0.8,
+               case     = 0.3)
+p_voc  <- list("wuhan+" = 0.4,
+              "wuhan-"  = 0.05)
+
+patient_frame <- do.call(rbind, case_control)
+patient_frame <- mutate(
+  patient_frame,
+  drug=ifelse(cohort=="control","none",drug),
+  cohort=relevel(factor(cohort), "control"))
+
+
+boot_individ <- data.frame(i=1:1000, coef=0.0)
+diseases <- unique(patient_frame$disease)
+drugs <- unique(patient_frame$drug[patient_frame$cohort=="case"])
+drug_offset <- sapply( unique(patient_frame$drug), function(x) 0.0)
+#boot_mat <- matrix(0,4,nrow(boot_individ))
+
+for (i in 1:nrow(boot_individ)) {
+  disease_offset <- setNames(runif(length(diseases), -0.05, .05), diseases)
+  drug_offset[drugs] <- runif(length(drugs), -0.01, .01)
+  patient_frame <- mutate(
+    patient_frame,
+    wuhan=ifelse(runif(n())<unlist(p_wuhan[as.character(cohort)]) + disease_offset[disease] + drug_offset[drug],"wuhan+","wuhan-"),
+    voc = ifelse(runif(n()) < unlist(p_voc[as.character(wuhan)]), "voc+", "voc-"),
+    wuhan=relevel(factor(wuhan), "wuhan+"),
+    voc=relevel(factor(voc), "voc-")
+  )
+  dat_agg <- group_by(patient_frame , disease, drug, cohort, wuhan, voc) %>%
+    summarise(n=n(), .groups="drop")
+#  fit <- glm(n~cohort*wuhan*voc + disease, data=dat_agg, family=poisson)
+#  boot_individ$coef[i] <- coef(fit)["cohortcase:wuhanwuhan-:vocvoc+"]
+#  next
+  fit <- rms::lrm(voc ~ wuhan * cohort + disease, data=patient_frame,x=TRUE, y=TRUE)
+#  fit <- robcov(fit, cluster=patient_frame$drug)
+#  em <- emmeans(fit, spec=~cohort+wuhan,  tran="logit")
+#  boot_mat[,i] <- summary(em, type="response")$response
+  boot_individ$coef[i] <- coef(fit)["wuhan=wuhan- * cohort=case"]
+  #boot_individ$coef[i] <- as.data.frame(em$contrasts)$estimate
+}
+quantile(exp(na.omit(boot_individ$coef)),c(0.025,0.975))
+quantile(na.omit(boot_individ$coef),c(0.025,0.975))
 
