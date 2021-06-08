@@ -23,7 +23,10 @@ n_per_drug_per_cohort <- list(
   )
 )
 
-# Ns in the control cohort
+# Ns in the control cohort - a heuristic might be to take a
+# proportionate number compared to controls, and add on some
+# to ensure numbers don't get too low
+
 cc_prop  = 0.2; cc_const = 20 # multiply by prop, add const, to get nunber of controls
 # 0.2 and 0 above give us a total of 500 controls - as would 0 and 100
 #cc_prop = 0; cc_const = 100
@@ -31,7 +34,8 @@ n_per_drug_per_cohort$control <- lapply(
   n_per_drug_per_cohort$case, function(x) sum(x)*cc_prop + cc_const
 )
 
-# scale back to 2000 in total
+# scale back to 2000 in total - now been told that is a reasonable
+# number to be able to recruit
 n_per_drug_per_cohort <- lapply(n_per_drug_per_cohort, function(x) {lapply(x, function(y) y * 2000/3114)})
 ## Effect sizes
 
@@ -42,6 +46,10 @@ n_per_drug_per_cohort <- lapply(n_per_drug_per_cohort, function(x) {lapply(x, fu
 prob2odd <- function(p) p/(1-p)
 odd2prob <- function(o) o/(1+o)
 
+
+# Toy example to explain different possible definitions of
+# synergistic effect: additive risk, multiplicative risk,
+# additive log-odds - irrelevant for this calculation though
 outcomes <- expand.grid(strain=c("vaccine", "voc"),
                        cohort=c("control","case"))
 baseline=0.05
@@ -67,7 +75,7 @@ case_effect <- list(
 )
 
 # effect of interest
-eoi <- list(mult = 0.5, # 0.5 is about half the log-odds effect size of 0.7
+eoi <- list(mult = 0.5, 
            target = quote(variant=="voc" & cohort=="case"))
 
 # sd of effect across diseases
@@ -137,6 +145,11 @@ diseaseRes <- lapply(n_per_drug_per_cohort$case,
                     function(x) bootRes)
 
 
+# For simulation, instantiate the random effects
+# (disease and, for cases, drugs) to give odds
+# of responsiveness, and then sample on the logit
+# scale with the correct odds for each case and control
+
 for (i in 1:nrow(bootRes)) { 
   cat(i, " ")
   ## Get instance of random effects:
@@ -201,6 +214,8 @@ for (i in 1:nrow(bootRes)) {
 
 
 
+# extra function to look at different scales on which
+# to assess additivity
 additive_prob <- function(start, end1, end2, link="logit") {
   fns <- make.link(link)
   odd_effect_1 <- fns$linkfun(end1)-fns$linkfun(start)
@@ -213,6 +228,12 @@ additive_prob <- function(start, end1, end2, link="logit") {
 
 
 ### Individual responsiveness
+# Exploratory approach to look at per-patient
+# mutant response in the context of their own wuhan
+# responsiveness - don't really have the prior info
+# for this, but the final analysis will probably be
+# more along these lines
+
 p_wuhan <- list(control = 0.8,
                case     = 0.3)
 p_voc  <- list("wuhan+" = 0.4,
